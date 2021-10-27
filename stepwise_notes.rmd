@@ -1,0 +1,176 @@
+---
+title: "Stepwise must die - a discussion of Wittingham et al 2006"
+author: "Thiago Silva"
+date: "27/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## Introduction
+
+This notebook accompanies the discussion of "Whittingham, Stephens, Bradbury and Freckleton (2006) **Why do we still use stepwise modelling in ecology and behaviour?** Journal of Animal Ecology **75**, 1182--1189.
+
+## Model Selection Bias
+
+The paper gives an example of just fitting a parameter versus performing model selection, and how that biases the results. To undertand the comparison, two things are necessary:
+
+1 - You need to understand that when a model is fit the coefficients are actually *estimates* themselves, and so they have an associated uncertainty (error), and therefore a statistical distribution. For general linear models (NOT general*ized*), the coefficients are normally distributed, but usually approximated by a *t* distribution to reduce sampling effor bias. 
+
+2 - You also need to understand that just calculating the mean of the dataset is aleady a model fit, and it is the $Y = \alpha + \epsilon$ in the paper. As any other coefficient, the mean also has an error (standard error of the mean), and therefore a distribution. This is the distribution we use when doing a t-test.
+
+So let's reproduce the simulation:
+
+```{r model bias}
+# Let us create a uniformly distributed X variable with 20 observations, varying
+# between 0 and 50
+set.seed(1979) # forces the random number to be always the same
+x <- runif(20,0,50)
+
+# Then we create an Y variable which we will "know" is a linear function
+# of X, and add a normally distributed error with mean =0 and sd = 1
+y = 0.5 * x + rnorm(20,0,1)
+
+# What does the data look like?
+library(ggplot2)
+data_df <- data.frame(x = x, y = y)
+ggplot(data_df, aes(x,y)) + geom_point()
+```
+```{r bias2}
+# Our first model is y = a + e:
+m1 <- mean(y)
+print(c("This is the calculated mean: ", m1))
+se1 <- sd(y)/sqrt(length(y))
+print(c("This is the calculated standard error: ",se1))
+
+# Or, we can use lm if we want
+m1_1 <- lm(y ~ 1, data = data_df)
+print(summary(m1_1))
+ggplot(data_df,aes(0, y)) + 
+    geom_point() +
+    xlim(-0.25,0.25) +
+    geom_segment(
+        aes(x = -0.01, 
+            xend = 0.01, 
+            y = mean(y), 
+            yend=mean(y)), 
+        color='red')
+```
+
+```{r bias3}
+# We can also fit the alternative model:
+m2 <- lm(y ~ x, data = data_df)
+summary(m2)
+ggplot(data_df,aes(x, y)) + 
+    geom_point() +
+    geom_smooth(method = lm,color='red')
+```
+
+So on our m2, the $b$ coefficient (slope) has an estimated value of 0.5, and a standard error of 0.016. Assuming a normal distribution, this is what you would expect to see if you repeated your experiment 1000 times:
+
+```{r b_dist}
+b_dist <- data.frame(b_dist = rnorm(1000,0.509, 0.0165))
+ggplot(b_dist,aes(b_dist)) + geom_histogram()
+```
+
+But, if we are only accepting values of b that are significantly different from zero at 95%, meaning values >= 0 + (1.96 * standard_error), then we have:
+
+```{r b_test}
+b_null <- data.frame(b_null = rnorm(1000,0,0.0165))
+z_crit = 1.96*0.0165
+b_null$b_null[b_null$b_null < z_crit] <- 0
+ggplot(b_null,aes(b_null)) + geom_histogram()
+```
+
+## Inconsistent results
+
+The major problem with stepwise selection is that standard errors in linear models are heavily influenced by colinearity, and since ecological data is rarely perfectly uncorrelated (i.e. experimental), the results are never reliable. 
+
+Let us look at some theoretical examples. First, let us imagine the ideal situation. Y is a function of X1 and X2 which are perfectly uncorrelated.
+
+```{r nocollin}
+# As it is pretty hard to get perfectly orthogonal variables
+# by simulation, we will simulate X1 and X2 and then apply a PCA on them:
+set.seed(1979)
+x1 <- runif (20,0,50)
+x2 <- x1 + runif (20,0,10) # forcing X2  to be correlated to X1
+pca <- prcomp(~ x1 + x2)
+data_df2 <- cbind(x1,x2,data.frame(predict(pca)))
+print(cor(data_df2$PC1, data_df2$PC2))
+print(head(data_df2))
+      
+# Now let us create a Y variable that is a function of both
+set.seed(1979)
+data_df2$y <- 3 * data_df2$PC1 + 3 * data_df2$PC2 + rnorm(20,0,5) 
+
+m_ideal <- lm(y ~ PC1 + PC2, data = data_df2)
+print(anova(m_ideal))
+
+# We can calculate the total sum of squares, which is the
+# variance before dividing by n-1
+tot_sq <- var(data_df2$y) * (length(data_df2$y)-1)
+```
+
+In this perfect case, the variance of Y can be perfectly partitioned between PC1, PC2 and the residual variance:
+
+```{r nocollin2}
+sum(anova(m_ideal)$`Sum Sq`)
+tot_sq
+
+```
+
+We could visualise it as:
+
+```{r}
+var_vec <- data.frame(mod = c("PC1","PC2","Residual"), vari = c(212675,95482,167))
+ggplot(var_vec, aes(fill = mod, x=0, y = vari)) + geom_bar(position = 'stack', stat = 'identity')
+```
+
+However, if the variables are correlated, then a portion of the explained variance is "shared" between them, and so whichever variable comes first in the model will "take" that variance. Let us look at the original X1 and X2 variables:
+
+```{r collin}
+# Highly correlated
+print(cor(data_df2$x1, data_df2$x2))
+
+# So let us fit a model:
+m_colin1 <- lm(terms(y ~ x1 + x2, keep.order = TRUE), data = data_df2)
+summary(m_colin1)
+anova(m_colin1)
+```
+
+Whaaaat? First, X1 explains most of the variance, but it is "not significant". However:
+
+```{r simplereg}
+mod_x1 <- lm(y ~ x1, data = data_df2)
+summary(mod_x1)
+anova(mod_x1)
+
+mod_x2 <- lm(y ~ x2, data = data_df2)
+summary(mod_x2)
+anova(mod_x2)
+```
+
+The problem is that since the estimation of the $b$ coefficients is based on how much *independent* variance each one explains, the estimates get confused, and the errors get larger. This is called "variance inflation", and there is even a statistical metric to measure it, called the "VIF" (Variance Inflation Factor). It measures how much the variance of a coefficient is inflated by colinearity.
+
+```{r vif}
+library(car)
+
+vif(m_ideal)
+
+vif(m_colin1)
+
+```
+
+This same problem also means that *p*-values will not be reliable, and will be changed depending on the order then enter the model!
+
+```{r var_order}
+anova(m_colin1)
+
+m_colin2 <- lm(terms(y ~ x2 + x1, keep.order = TRUE), data = data_df2)
+
+anova(m_colin2)
+```
+
+Therefore, when you apply either backwards or forwards selection (adding or removing one term at a time), the choice of terms to be maintained will based on whether they are significant or not. Can you see the problem now?
